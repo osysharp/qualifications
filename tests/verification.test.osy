@@ -1,0 +1,52 @@
+// A qualification a person submits — with its evidence — counts only once staff verify it; turned down, it says why.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+using Osysharp.Storage;
+
+[Test(Lake)]
+[runas(Ada)]
+void a_submitted_licence_waits_for_its_evidence_and_counts_once_verified() {
+  var c = SubmitQualification(Ada, "skipper-licence", new DateOnly(2024, 5, 1), "PB-20391", "Royal Yachting Association");
+  Assert.Equal(QualificationState.Waiting, CheckQualification(Ada, "skipper-licence").State);
+  Assert.Equal("Skipper's licence is waiting for verification.", CheckQualification(Ada, "skipper-licence").Reason);
+  runas(Dan) {
+    Assert.Equal("Skipper's licence needs evidence before it is verified.",
+                 Assert.Throws<ValidationException>(() => VerifyQualification(c)).Message);
+  }
+  var file = File.Create("licence.pdf", "application/pdf", Encoding.UTF8.GetBytes("%PDF-1.4 licence"));
+  UnitOfWork.Commit();
+  Assert.Denied(() => { new QualificationEvidence { Qualification = c, File = file, Name = "licence.pdf" }; UnitOfWork.Commit(); });
+  AttachEvidence(c, file);
+  Assert.Equal(1, QualificationEvidence.Count(e => e.Qualification == c));
+  runas(Dan) { Assert.Equal(1, QualificationEvidence.Count(e => e.Qualification == c)); }
+  runas(Bo) { Assert.Equal(0, QualificationEvidence.Count()); }
+  runas(Dan) { VerifyQualification(c); }
+  var check = CheckQualification(Ada, "skipper-licence");
+  Assert.True(check.IsValid);
+  Assert.Equal(new DateOnly(2029, 4, 30), check.ValidUntil);
+  Assert.Equal(Dan.Id, Qualification.Single(x => x.Id == c.Id).VerifiedBy!.Id);
+}
+
+[Test(Lake)]
+[runas(Bo)]
+void a_submitted_briefing_turned_down_says_why() {
+  var c = SubmitQualification(Bo, "safety-briefing", new DateOnly(2026, 10, 20), "", "Another marina");
+  runas(Dan) { RejectQualification(c, "We brief every customer ourselves"); }
+  var check = CheckQualification(Bo, "safety-briefing");
+  Assert.Equal(QualificationState.Expired, check.State);
+  Assert.Equal(QualificationStatus.Rejected, Qualification.Single(x => x.Id == c.Id).Status);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "rejected" && h.Detail == "We brief every customer ourselves"));
+}
+
+[Test(Lake)]
+[runas(Bo)]
+void nobody_submits_a_waiver_or_a_qualification_from_the_future_or_for_somebody_else() {
+  Assert.Equal("Hire waiver is signed, not submitted.",
+               Assert.Throws<ValidationException>(() => SubmitQualification(Bo, "hire-waiver", new DateOnly(2026, 10, 1))).Message);
+  Assert.Equal("A qualification cannot be issued in the future.",
+               Assert.Throws<ValidationException>(() => SubmitQualification(Bo, "first-aid", new DateOnly(2026, 12, 1))).Message);
+  Assert.Throws(() => SubmitQualification(Ada, "first-aid", new DateOnly(2026, 10, 1)));
+}

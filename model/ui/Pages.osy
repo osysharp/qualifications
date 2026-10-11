@@ -1,0 +1,540 @@
+// The kit's pages, served at its routes in every app that uses it — in the app's own shell and theme:
+//
+//     /qualifications                    MyQualificationsPage       what the signed-in person holds, what they still sign
+//     /staff/qualifications              QualificationsDeskPage     what lapses soon, what waits for verification, a person's
+//     /staff/qualifications/kinds        QualificationKindsPage     the kinds, and the text each waiver is signed on
+//
+// ⚑ AN APP TAKES ONE OVER by declaring a component of the same name — with a `[Route]` of its own it is served there
+//   instead; without one, the address is not served. The parts (`QualificationsOfPerson`, `QualificationsDesk`,
+//   `QualificationKinds`, `QualificationCardView`) are `[Composable]`: a guardian's page of the app's own places
+//   `QualificationsOfPerson(child.Id)` to sign for a child. Every colour, face and size is a theme token, so a look
+//   re-skins them.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+using Osysharp.Ui;
+
+// ── the pages ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The signed-in person's qualifications.
+[Route("/qualifications")] [Layout(WorkspaceFrame)] [Authorize] [Render(CSR)] [Title("Your qualifications")]
+public component MyQualificationsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "960px") {
+      PageHead("Your qualifications", subtitle: "What you hold, until when — and anything still waiting for your signature.");
+      QualificationsOfPerson();
+    }
+  }
+}
+
+/// The desk.
+[Route("/staff/qualifications")] [Layout(WorkspaceFrame)] [Authorize(ChecksQualifications)] [Render(CSR)] [Title("Qualifications")]
+[Nav("Qualifications", Order = 60)]
+public component QualificationsDeskPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1200px") {
+      PageHead("Qualifications", subtitle: "What lapses soon, what waits for verification, and anybody's record.");
+      QualificationsDesk();
+    }
+  }
+}
+
+/// The kinds.
+[Route("/staff/qualifications/kinds")] [Layout(WorkspaceFrame)] [Authorize(ManagesQualificationKinds)] [Render(CSR)] [Title("Qualification kinds")]
+public component QualificationKindsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1000px") {
+      PageHead("Qualification kinds", subtitle: "What you recognise, how long each holds, and the text a waiver is signed on.");
+      QualificationKinds();
+    }
+  }
+}
+
+// ── the parts ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One qualification as a card — its kind, where it stands, until when, the number on it, who signed — with the actions
+/// passed in.
+[Composable, Part]
+public component QualificationCardView(QualificationCard c) {
+  render {
+    Stack(gap: 2, p: 5, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, role: UiRole.ListItem, label: c.Kind) {
+      Row(gap: 3, align: Align.Start, wrap: Wrapping.Wrap) {
+        Stack(gap: 0, grow: 1, minW: "0") {
+          Text(c.Kind, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+          Text(c.Category + " · " + c.Until, fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+        Badge(c.Standing, tone: c.Good ? Tone.Success : c.Warn ? Tone.Warning : c.Standing == "Renewed" ? Tone.Ghost : Tone.Danger);
+      }
+      if (c.Reference != "" || c.IssuedBy != "") {
+        Text((c.Reference != "" ? "No. " + c.Reference : "") + (c.Reference != "" && c.IssuedBy != "" ? " · " : "") + (c.IssuedBy != "" ? "Issued by " + c.IssuedBy : ""),
+             fontSize: FontSize.Caption, color: Colors.TextSecondary);
+      }
+      if (c.Signed != "") { Text(c.Signed, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+      if (c.Reason != "") { Text(c.Standing + ": " + c.Reason, fontSize: FontSize.Caption, color: Colors.Danger); }
+      if (c.Evidence.Count > 0) {
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          foreach (var e in c.Evidence) {
+            Link(fileAsset: e.File, color: Colors.Primary, fontSize: FontSize.Caption, fontWeight: FontWeight.Semibold) { Text(e.Name); }
+          }
+        }
+      }
+      Row(gap: 2, wrap: Wrapping.Wrap) { Slot; }
+    }
+  }
+}
+
+/// A person's qualifications — the signed-in person's, or (`person`) somebody they act for or may check — with what they
+/// still have to sign, the exact text shown before they sign it, and submitting one of their own with its evidence. In a
+/// test: `Ui.Click("Read and sign", within: "Hire waiver"); Ui.Check("I have read it and agree")`.
+[Composable]
+public component QualificationsOfPerson(Guid? person = null) {
+  QualificationWallet wallet = new QualificationWallet();
+  List<QualificationKind> kinds = [];
+  string done = "";
+  string problem = "";
+  // signing
+  ToSign? signing = null;
+  bool agreed = false;
+  string signedName = "";
+  // showing a signed text
+  QualificationCard? reading = null;
+  // submitting
+  bool submitting = false;
+  QualificationKind? kind = null;
+  DateOnly? issuedOn = null;
+  string reference = "";
+  string issuedBy = "";
+  List<UploadedFile> files = [];
+  // adding evidence to one already submitted
+  Guid attachingTo = Guid.Empty;
+
+  on mount { Load(); }
+  action Load() { wallet = QualificationWalletOf(person); }
+  action StartSign(ToSign s) { signing = s; agreed = false; signedName = ""; problem = ""; }
+  action StopSign() { signing = null; }
+  action Sign() {
+    problem = "";
+    if (!agreed) { problem = "Tick that you have read it and agree."; return; }
+    try {
+      SignQualification(Principal.Single(p => p.Id == wallet.Person), QualificationText.Single(t => t.Id == signing!.Text), signedName);
+      done = $"{signing!.Name} is signed."; signing = null;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Read(QualificationCard c) { reading = c; }
+  action StopReading() { reading = null; }
+  action StartSubmit() { kinds = SubmittableKinds(); kind = null; issuedOn = null; reference = ""; issuedBy = ""; files = []; problem = ""; submitting = true; }
+  action StopSubmit() { submitting = false; }
+  action Took(UploadedFile f) { var next = files.ToList(); next.Add(f); files = next; }
+  action Submit() {
+    problem = "";
+    if (kind == null) { problem = "Choose what it is."; return; }
+    if (issuedOn == null) { problem = "Say when it was issued."; return; }
+    try {
+      var c = SubmitQualification(Principal.Single(p => p.Id == wallet.Person), kind!.Key, issuedOn!.Value, reference, issuedBy);
+      foreach (var f in files) { AttachEvidence(c, KeepEvidence(f)); }
+      done = $"{kind!.Name} is sent for verification."; submitting = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartAttach(QualificationCard c) { attachingTo = c.Id; problem = ""; }
+  action Attach(UploadedFile f) {
+    problem = "";
+    try { AttachEvidence(Qualification.Single(c => c.Id == attachingTo), KeepEvidence(f)); done = "The file is added."; attachingTo = Guid.Empty; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 6) {
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "" && signing == null && !submitting) { Alert(problem, tone: Tone.Danger); }
+      if (wallet.Unsigned.Count > 0) {
+        Stack(gap: 2) {
+          SectionLabel("Waiting for your signature");
+          Stack(gap: 3, role: UiRole.List, label: "Waiting for your signature") {
+            foreach (var s in wallet.Unsigned) {
+              Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, p: 5, bg: Colors.Warning.Subtle, borderW: 1, border: Colors.Border,
+                  rounded: Radius.Lg, role: UiRole.ListItem, label: s.Name) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(s.Name, fontWeight: FontWeight.Semibold);
+                  Text(s.Description != "" ? s.Description : "Read it, then sign with your name.", fontSize: FontSize.Caption, color: Colors.TextSecondary);
+                }
+                Button("Read and sign", onPress: () => StartSign(s), tone: Tone.Primary, size: Size.Sm);
+              }
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        Row(gap: 2, align: Align.Center) {
+          Box(grow: 1) { SectionLabel("Held"); }
+          Button("Add a qualification", onPress: StartSubmit, size: Size.Sm);
+        }
+        Stack(gap: 3, role: UiRole.List, label: "Held") {
+          if (wallet.Cards.Count == 0) { EmptyState("Nothing on record yet", body: "Licences, certificates, inductions and signed agreements appear here."); }
+          foreach (var c in wallet.Cards) {
+            QualificationCardView(c) {
+              if (c.TextBody != "") { Button("Read what was signed", onPress: () => Read(c), size: Size.Sm, tone: Tone.Ghost); }
+              if (c.CanAttach) { Button("Add a file", onPress: () => StartAttach(c), size: Size.Sm, tone: Tone.Ghost); }
+            }
+          }
+        }
+      }
+    }
+    if (signing != null) {
+      Dialog(signing!.Name, onDismiss: StopSign, subtitle: "Version " + signing!.Version + ". Read it all before you sign — what you sign is kept exactly as shown.") {
+        Box(maxH: "320px", overflow: Overflow.Auto, p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md,
+            role: UiRole.Region, label: "The text") {
+          Text(signing!.Body, whiteSpace: WhiteSpace.PreWrap);
+        }
+        Checkbox("I have read it and agree", value: agreed);
+        Field("Your full name, as your signature", value: signedName);
+        if (wallet.Name != "") { Hint("Signing for " + wallet.Name + "."); }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopSign, tone: Tone.Ghost);
+          Button("Sign", onPress: Sign, tone: Tone.Primary);
+        }
+      }
+    }
+    if (reading != null) {
+      Dialog(reading!.Kind, onDismiss: StopReading, subtitle: reading!.Signed) {
+        Box(maxH: "420px", overflow: Overflow.Auto, p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+          Text(reading!.TextBody, whiteSpace: WhiteSpace.PreWrap);
+        }
+        Row(gap: 2, justify: Justify.End) { Button("Close", onPress: StopReading, tone: Tone.Ghost); }
+      }
+    }
+    if (submitting) {
+      Dialog("Add a qualification", onDismiss: StopSubmit, subtitle: "Staff check it before it counts. Add a scan or a photo of it.") {
+        Dropdown("What it is", value: kind, options: kinds, placeholder: "Choose") { k => Text(k.Name); }
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { DatePicker("Issued on", value: issuedOn); }
+          Box(w: "200px") { Field("Number on it", value: reference); }
+          Box(w: "240px") { Field("Issued by", value: issuedBy); }
+        }
+        Upload(privately: true, accept: "application/pdf,image/*", onUploaded: Took) {
+          Row(gap: 2, align: Align.Center, p: 3, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+            Text("Choose a file", fontWeight: FontWeight.Medium, color: Colors.Primary);
+            Text("PDF or a picture", fontSize: FontSize.Caption, color: Colors.TextMuted);
+          }
+        }
+        foreach (var f in files) { Text(f.FileName, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopSubmit, tone: Tone.Ghost);
+          Button("Send for verification", onPress: Submit, tone: Tone.Primary);
+        }
+      }
+    }
+    if (attachingTo != Guid.Empty) {
+      Dialog("Add a file", onDismiss: () => { attachingTo = Guid.Empty; }, subtitle: "A scan or a photo of it — PDF or a picture.") {
+        Upload(privately: true, accept: "application/pdf,image/*", onUploaded: Attach) {
+          Row(gap: 2, align: Align.Center, p: 3, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+            Text("Choose a file", fontWeight: FontWeight.Medium, color: Colors.Primary);
+          }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      }
+    }
+  }
+}
+
+/// The desk: what lapses within the window, what lapsed, what waits for verification (verify or turn down, with the
+/// evidence), and anybody's record — record a qualification for them, revoke one. In a test:
+/// `Ui.Click("Verify", within: "Ada Moreno")`, `Ui.Fill("Find a person", "ada"); Ui.Click("Find")`.
+[Composable]
+[Authorize(ChecksQualifications)]
+public component QualificationsDesk() {
+  int days = 30;
+  QualificationDeskView view = new QualificationDeskView();
+  string done = "";
+  string problem = "";
+  string search = "";
+  List<QualificationPerson> found = [];
+  Guid open = Guid.Empty;
+  QualificationWallet wallet = new QualificationWallet();
+  // turning down / revoking
+  Guid closing = Guid.Empty;
+  bool revoking = false;
+  string closingWhat = "";
+  string why = "";
+  // recording
+  bool recording = false;
+  List<QualificationKind> kinds = [];
+  QualificationKind? kind = null;
+  DateOnly? issuedOn = null;
+  string reference = "";
+  string issuedBy = "";
+
+  on mount { Load(); }
+  action Load() { view = QualificationDeskOf(days); if (open != Guid.Empty) { wallet = QualificationWalletOf(open); } }
+  action Find() { found = FindQualificationHolders(search); }
+  action Open(Guid id) { open = id; done = ""; problem = ""; Load(); }
+  action OpenLine(QualificationLine l) { Open(l.Person); }
+  action Verify(QualificationLine l) {
+    done = ""; problem = "";
+    try { VerifyQualification(Qualification.Single(c => c.Id == l.Id)); done = $"{l.Name}'s {l.Kind} counts from now."; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action AskReject(QualificationLine l) { closing = l.Id; revoking = false; closingWhat = l.Name + "'s " + l.Kind; why = ""; problem = ""; }
+  action AskRevoke(QualificationCard c) { closing = c.Id; revoking = true; closingWhat = wallet.Name + "'s " + c.Kind; why = ""; problem = ""; }
+  action StopClosing() { closing = Guid.Empty; }
+  action Close() {
+    problem = "";
+    try {
+      var c = Qualification.Single(x => x.Id == closing);
+      if (revoking) { RevokeQualification(c, why); done = $"{closingWhat} is revoked."; } else { RejectQualification(c, why); done = $"{closingWhat} is not accepted."; }
+      closing = Guid.Empty;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartRecord() {
+    kinds = QualificationKind.Where(k => k.Active).OrderBy(k => k.SortOrder).ThenBy(k => k.Name).Take(100).ToList();
+    kind = null; issuedOn = null; reference = ""; issuedBy = ""; problem = ""; recording = true;
+  }
+  action StopRecord() { recording = false; }
+  action Record() {
+    problem = "";
+    if (kind == null) { problem = "Choose what it is."; return; }
+    try {
+      RecordQualification(Principal.Single(p => p.Id == open), kind!.Key, issuedOn, reference, issuedBy);
+      done = $"{wallet.Name} holds {kind!.Name}."; recording = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 6) {
+      Row(gap: 6, wrap: Wrapping.Wrap) {
+        Metric("lapse within " + days + " days", text: view.Lapsing.Count.ToString());
+        Metric("lapsed in the last " + days + " days", text: view.Lapsed.Count.ToString());
+        Metric("waiting for verification", text: view.Waiting.Count.ToString());
+      }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "" && closing == Guid.Empty && !recording) { Alert(problem, tone: Tone.Danger); }
+      Row(gap: 5, align: Align.Start, wrap: Wrapping.Wrap, w: "100%") {
+        Stack(gap: 5, grow: 1, minW: Layout.AtLeast(Laptop) ? "420px" : "0", w: Layout.AtLeast(Laptop) ? "auto" : "100%") {
+          if (view.Waiting.Count > 0) {
+            QualificationLines("Waiting for verification", view.Waiting, "Nothing waits.", "Verify", Verify, "Turn down", AskReject);
+          }
+          QualificationLines("Lapsing soon", view.Lapsing, "Nothing lapses in the next " + days + " days.", "Open", OpenLine, "", null);
+          QualificationLines("Lapsed", view.Lapsed, "Nothing lapsed in the last " + days + " days.", "Open", OpenLine, "", null);
+        }
+        Stack(gap: 3, w: Layout.AtLeast(Laptop) ? "420px" : "100%", shrink: 0) {
+          Row(gap: 2, align: Align.Center) {
+            Box(grow: 1, minW: "0") { SearchField("Find a person", value: search) { } }
+            Button("Find", onPress: Find, size: Size.Sm);
+          }
+          Stack(gap: 0, role: UiRole.List, label: "People found") {
+            foreach (var h in found) {
+              Pressable(onClick: () => Open(h.Id), label: h.Name, role: UiRole.ListItem, current: h.Id == open) {
+                Stack(gap: 0, px: 3, py: 2, borderBW: 1, border: Colors.Border, bg: h.Id == open ? Colors.Primary.Subtle : Colors.Surface) {
+                  Text(h.Name, fontWeight: FontWeight.Medium);
+                  Text(h.Email, fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+              }
+            }
+          }
+          if (open != Guid.Empty) {
+            Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+              Text(wallet.Name, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold, grow: 1);
+              if (IssuesQualifications) { Button("Record a qualification", onPress: StartRecord, size: Size.Sm); }
+            }
+            Stack(gap: 3, role: UiRole.List, label: "Their qualifications") {
+              if (wallet.Cards.Count == 0) { EmptyState("Nothing on record", body: "Record what they hold."); }
+              foreach (var c in wallet.Cards) {
+                QualificationCardView(c) {
+                  if (c.CanRevoke && IssuesQualifications) { Button("Revoke", onPress: () => AskRevoke(c), size: Size.Sm, tone: Tone.Danger); }
+                }
+              }
+            }
+            if (wallet.Unsigned.Count > 0) {
+              Text("Not signed yet: " + string.Join(", ", wallet.Unsigned.Select(u => u.Name)), fontSize: FontSize.Caption, color: Colors.TextMuted);
+            }
+          }
+        }
+      }
+    }
+    if (closing != Guid.Empty) {
+      Dialog(revoking ? "Revoke " + closingWhat : "Turn down " + closingWhat, onDismiss: StopClosing,
+             subtitle: revoking ? "It stops counting at once. The record stays, with the reason." : "They are told why, and can send it again.") {
+        Field("Why", value: why);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopClosing, tone: Tone.Ghost);
+          Button(revoking ? "Revoke it" : "Turn it down", onPress: Close, tone: Tone.Danger);
+        }
+      }
+    }
+    if (recording) {
+      Dialog("Record a qualification for " + wallet.Name, onDismiss: StopRecord, subtitle: "It counts from the day it was issued, for as long as its kind holds.") {
+        Dropdown("What it is", value: kind, options: kinds, placeholder: "Choose") { k => Text(k.Name); }
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { DatePicker("Issued on", value: issuedOn, clearable: true, placeholder: "Today"); }
+          Box(w: "200px") { Field("Number on it", value: reference); }
+          Box(w: "240px") { Field("Issued by", value: issuedBy); }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopRecord, tone: Tone.Ghost);
+          Button("Record it", onPress: Record, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}
+
+/// A titled list of qualifications, each line with up to two actions: `primary` (a button) and `secondary` (a quieter one).
+[Composable, Part]
+public component QualificationLines(string title, List<QualificationLine> lines, string empty, string primary, Action<QualificationLine> onPrimary,
+                                 string secondary, Action<QualificationLine>? onSecondary) {
+  render {
+    Stack(gap: 2) {
+      SectionLabel(title);
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: title) {
+        if (lines.Count == 0) { Box(p: 4) { Text(empty, color: Colors.TextMuted); } }
+        foreach (var l in lines) {
+          Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Name) {
+            Stack(gap: 0, grow: 1, minW: "0") {
+              Text(l.Name + " · " + l.Kind, fontWeight: FontWeight.Medium);
+              Text(l.Detail, fontSize: FontSize.Caption, color: Colors.TextMuted);
+              if (l.Evidence.Count > 0) {
+                Row(gap: 3, wrap: Wrapping.Wrap) {
+                  foreach (var e in l.Evidence) {
+                    Link(fileAsset: e.File, color: Colors.Primary, fontSize: FontSize.Caption, fontWeight: FontWeight.Semibold) { Text(e.Name); }
+                  }
+                }
+              }
+            }
+            if (onSecondary != null) { Button(secondary, onPress: () => onSecondary!(l), size: Size.Sm, tone: Tone.Ghost); }
+            Button(primary, onPress: () => onPrimary(l), size: Size.Sm, tone: secondary != "" ? Tone.Primary : Tone.Ghost);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The kinds, and adding or changing one — with the text a waiver is signed on, each new wording a new version. In a
+/// test: `Ui.Click("Add a kind"); Ui.Fill("Key", "first-aid")`.
+[Composable]
+[Authorize(ManagesQualificationKinds)]
+public component QualificationKinds() {
+  List<QualificationKind> kinds = [];
+  List<QualificationText> texts = [];
+  bool editing = false;
+  Guid editingId = Guid.Empty;
+  string key = "";
+  string name = "";
+  string description = "";
+  QualificationCategory category = QualificationCategory.Certificate;
+  int months = 0;
+  bool signed = false;
+  bool evidence = false;
+  bool active = true;
+  Guid wording = Guid.Empty;
+  string wordingName = "";
+  string body = "";
+  string done = "";
+  string problem = "";
+
+  on mount { Load(); }
+  action Load() {
+    kinds = QualificationKind.OrderBy(k => k.SortOrder).ThenBy(k => k.Name).Take(100).ToList();
+    texts = QualificationText.Include(t => t.Kind).OrderByDescending(t => t.Version).Take(300).ToList();
+  }
+  action StartNew() { editingId = Guid.Empty; key = ""; name = ""; description = ""; category = QualificationCategory.Certificate; months = 0;
+                      signed = false; evidence = false; active = true; problem = ""; editing = true; }
+  action Edit(QualificationKind k) { editingId = k.Id; key = k.Key; name = k.Name; description = k.Description; category = k.Category;
+                                  months = k.ValidForMonths ?? 0; signed = k.SignedByHolder; evidence = k.NeedsEvidence; active = k.Active;
+                                  problem = ""; editing = true; }
+  action Stop() { editing = false; }
+  action Save() {
+    problem = "";
+    try {
+      var k = editingId == Guid.Empty ? new QualificationKind { Key = key.Trim().ToLower(), Name = name.Trim(), SortOrder = kinds.Count + 1 }
+                                       : QualificationKind.Single(x => x.Id == editingId);
+      k.Name = name.Trim(); k.Description = description.Trim(); k.Category = category;
+      k.ValidForMonths = months > 0 ? months : null; k.SignedByHolder = signed; k.NeedsEvidence = evidence; k.Active = active;
+      UnitOfWork.Commit();
+      done = $"{k.Name} is saved."; editing = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartWording(QualificationKind k) {
+    wording = k.Id; wordingName = k.Name; problem = "";
+    var current = texts.Where(t => t.Kind.Id == k.Id).FirstOrDefault();
+    body = current == null ? "" : current.Body;
+  }
+  action StopWording() { wording = Guid.Empty; }
+  action Publish() {
+    problem = "";
+    try {
+      var t = PublishQualificationText(QualificationKind.Single(k => k.Id == wording), body);
+      done = $"{wordingName} is signed on version {t.Version} from now on."; wording = Guid.Empty;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 4) {
+      Row(gap: 2, justify: Justify.End) { Button("Add a kind", onPress: StartNew, tone: Tone.Primary, size: Size.Sm); }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Kinds") {
+        if (kinds.Count == 0) { Box(p: 5) { EmptyState("No kinds yet", body: "Add what you recognise — a licence, an induction, a waiver people sign."); } }
+        foreach (var k in kinds) {
+          Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: k.Name) {
+            Stack(gap: 0, grow: 1, minW: "0") {
+              Text(k.Name, fontWeight: FontWeight.Medium, color: k.Active ? Colors.OnSurface : Colors.TextMuted);
+              Text(k.Category.Label + " · " + k.Key + " · " + (k.ValidForMonths == null ? "does not lapse" : $"holds {k.ValidForMonths} months")
+                   + (k.SignedByHolder ? " · signed by the person" : "") + (k.NeedsEvidence ? " · needs evidence" : ""),
+                   fontSize: FontSize.Caption, color: Colors.TextMuted);
+              if (k.SignedByHolder) {
+                var latest = texts.Where(t => t.Kind.Id == k.Id).FirstOrDefault();
+                Text(latest == null ? "No text yet — nobody can sign it" : $"Text version {latest.Version} · published {latest.PublishedAt.ToString("d MMM yyyy")}",
+                     fontSize: FontSize.Caption, color: latest == null ? Colors.Danger : Colors.TextSecondary);
+              }
+            }
+            if (!k.Active) { Badge("Retired", tone: Tone.Ghost); }
+            if (k.SignedByHolder) { Button("Text", onPress: () => StartWording(k), size: Size.Sm, tone: Tone.Ghost); }
+            Button("Edit", onPress: () => Edit(k), size: Size.Sm, tone: Tone.Ghost);
+          }
+        }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == Guid.Empty ? "Add a kind" : "Change " + name, onDismiss: Stop, subtitle: "Qualifications already held keep the dates they were given.") {
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "220px") { Field("Key", value: key, placeholder: "first-aid", hint: "How code refers to it; never changes", disabled: editingId != Guid.Empty); }
+          Box(w: "280px") { Field("Name", value: name, placeholder: "First aid certificate"); }
+        }
+        TextAreaField("What it is", value: description, rows: 2);
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { Dropdown("Category", value: category); }
+          Box(w: "200px") { NumberField("Holds for (months)", value: months, min: 0, hint: "0: does not lapse"); }
+        }
+        Checkbox("The person signs it themselves", value: signed);
+        Checkbox("Needs evidence when submitted", value: evidence);
+        Checkbox("Issued now", value: active);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: Stop, tone: Tone.Ghost);
+          Button("Save", onPress: Save, tone: Tone.Primary);
+        }
+      }
+    }
+    if (wording != Guid.Empty) {
+      Dialog("The text of " + wordingName, onDismiss: StopWording, subtitle: "Publishing makes a new version. Everyone who signed keeps the version they signed.") {
+        TextAreaField("Text", value: body, rows: 12);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopWording, tone: Tone.Ghost);
+          Button("Publish this version", onPress: Publish, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+// Each qualification's clock: the notice before it lapses and word when it does — and silence for one renewed in time.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+using Osysharp.Workflow;
+
+[Test(Lake)]
+[runas(Dan)]
+void a_holder_is_told_thirty_days_before_a_lapse_and_again_when_it_lapses() {
+  var c = CheckQualification(Ada, "safety-briefing").Qualification!;
+  Workflow.Settle(c);
+  TestClock.Set(new DateTime(2027, 1, 28, 12, 0, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(0, HeardCount("expiringsoon"));
+  TestClock.Set(new DateTime(2027, 1, 30, 12, 0, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "expiringsoon" && h.Detail == "safety-briefing:Ada Moreno"));
+  Assert.True(CheckQualification(Ada, "safety-briefing").ExpiresSoon);
+  Assert.Equal(1, LapsingWithin(30).Count);
+  TestClock.Set(new DateTime(2027, 3, 1, 0, 1, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "expired" && h.Detail == "safety-briefing:Ada Moreno"));
+  Assert.Equal(1, HeardCount("expiringsoon"));
+  Assert.Equal(1, LapsedWithin(30).Count);
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void a_qualification_renewed_in_time_lapses_in_silence() {
+  var c = CheckQualification(Ada, "safety-briefing").Qualification!;
+  Workflow.Settle(c);
+  TestClock.Set(new DateTime(2027, 1, 20, 12, 0, 0));
+  RecordQualification(Ada, "safety-briefing");
+  TestClock.Set(new DateTime(2027, 2, 10, 12, 0, 0));
+  Workflow.Settle(c);
+  TestClock.Set(new DateTime(2027, 3, 1, 0, 1, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(0, HeardCount("expiringsoon"));
+  Assert.Equal(0, HeardCount("expired"));
+  Assert.True(HasValidQualification(Ada, "safety-briefing"));
+  Assert.Equal(0, LapsingWithin(30).Count);
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void a_kind_s_own_notice_beats_the_apps() {
+  var c = RecordQualification(Dan, "first-aid", new DateOnly(2024, 2, 1));
+  Workflow.Settle(c);
+  // Lapses after 31 January 2027: sixty days' notice is due on 2 December, thirty days' not until 1 January.
+  TestClock.Set(new DateTime(2026, 12, 10, 12, 0, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "expiringsoon" && h.Detail == "first-aid:Dan Reyes"));
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void a_revoked_qualification_is_never_told_about_again_and_an_old_one_entered_lapsed_is_not_news() {
+  var c = CheckQualification(Ada, "safety-briefing").Qualification!;
+  Workflow.Settle(c);
+  RevokeQualification(c, "Briefed the wrong person");
+  TestClock.Set(new DateTime(2027, 3, 2, 0, 0, 0));
+  Workflow.Settle(c);
+  Background.Settle();
+  Assert.Equal(0, HeardCount("expired"));
+  Assert.Equal(1, Heard.Count(h => h.Event == "revoked" && h.Detail == "safety-briefing:Briefed the wrong person"));
+}

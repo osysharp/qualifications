@@ -1,0 +1,175 @@
+// Putting qualifications on record — by staff, by the person signing, or by the person submitting with evidence — and
+// taking them back.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+using Osysharp.Workflow;
+
+/// Today, as the kit counts days (UTC).
+public DateOnly QualificationToday() { return DateOnly.FromDateTime(DateTime.UtcNow); }
+
+/// "3 May 2027".
+public string QualificationDay(DateOnly d) { return d.ToString("d MMMM yyyy"); }
+
+/// The last day a qualification issued on `issuedOn` holds, for `months` months; empty for one that does not lapse.
+/// 3 May + 12 months holds through 2 May the next year; month ends clamp (31 January + 1 month → 27 or 28 February).
+public DateOnly? QualificationValidUntil(DateOnly issuedOn, int? months) {
+  if (months == null) { return null; }
+  return issuedOn.AddMonths(months.Value).AddDays(-1);
+}
+
+/// The kind with key `kindKey` — refused, with the reason, for an unknown or retired one.
+public QualificationKind KindToIssue(string kindKey) {
+  var kind = QualificationKind.FirstOrDefault(k => k.Key == kindKey);
+  if (kind == null) { throw new ValidationException("There is no qualification kind '" + kindKey + "'."); }
+  if (!kind.Active) { throw new ValidationException(kind.Name + " is no longer issued."); }
+  return kind;
+}
+
+/// The text a kind is signed on now — its latest version — or null when it has none.
+public QualificationText? CurrentText(QualificationKind kind) {
+  return QualificationText.Where(t => t.Kind == kind).OrderByDescending(t => t.Version).FirstOrDefault();
+}
+
+/// Publish a new wording for a kind people sign. The versions already signed stay as they were; from now on people
+/// sign this one.
+[Server, Authorize(ManagesQualificationKinds)]
+public QualificationText PublishQualificationText(QualificationKind kind, string body) {
+  if (string.IsNullOrWhiteSpace(body)) { throw new ValidationException("Write the text people sign."); }
+  var current = CurrentText(kind);
+  if (current != null && current.Body == body.Trim()) { return current; }
+  var text = new QualificationText { Kind = kind, Version = current == null ? 1 : current.Version + 1, Body = body.Trim(),
+                                  PublishedBy = CurrentPrincipal() };
+  UnitOfWork.Commit();
+  return text;
+}
+
+/// Staff record that `holder` holds a qualification of kind `kindKey`, from `issuedOn` (today by default) — in force at
+/// once. `reference` is the number on it, `issuedBy` who issued it outside this app.
+[Server, Authorize(IssuesQualifications)]
+public Qualification RecordQualification(Principal holder, string kindKey, DateOnly? issuedOn = null, string reference = "",
+                                   string issuedBy = "", string note = "") {
+  var kind = KindToIssue(kindKey);
+  var from = issuedOn ?? QualificationToday();
+  var me = CurrentPrincipal();
+  var c = new Qualification { Holder = holder, Kind = kind, IssuedOn = from, ValidUntil = QualificationValidUntil(from, kind.ValidForMonths),
+                           Reference = reference.Trim(), IssuedBy = issuedBy.Trim(), RecordedBy = me, Note = note.Trim(),
+                           VerifiedBy = me, VerifiedAt = DateTime.UtcNow };
+  Raise(new QualificationRecorded { Qualification = c });
+  UnitOfWork.Commit();
+  return c;
+}
+
+/// Sign a kind people sign themselves — a waiver, a declaration — for `holder` (yourself, or somebody you act for), on
+/// `text`: the version you were shown. Refused, with the reason, when the text has changed since, when no name is typed,
+/// or when you may not sign for them. In force from today.
+[Server, Authorize(IsAuthenticated)]
+public Qualification SignQualification(Principal holder, QualificationText text, string signedName) {
+  var kind = text.Kind;
+  if (!kind.Active) { throw new ValidationException(kind.Name + " is no longer signed."); }
+  if (!kind.SignedByHolder) { throw new ValidationException(kind.Name + " is recorded by staff, not signed."); }
+  if (!ActsForHolder(holder)) { throw new NotAuthorized("You can only sign for yourself, or for somebody you act for."); }
+  var current = CurrentText(kind);
+  if (current == null || current.Id != text.Id) {
+    throw new ValidationException("The text of " + kind.Name + " has changed since you read it — read the new version and sign that.");
+  }
+  if (string.IsNullOrWhiteSpace(signedName)) { throw new ValidationException("Type your full name to sign."); }
+  var me = CurrentPrincipal();
+  var today = QualificationToday();
+  var c = new Qualification { Holder = holder, Kind = kind, IssuedOn = today, ValidUntil = QualificationValidUntil(today, kind.ValidForMonths),
+                           RecordedBy = me, Text = text, SignedBy = me, SignedName = signedName.Trim(), SignedAt = DateTime.UtcNow };
+  Raise(new QualificationRecorded { Qualification = c });
+  UnitOfWork.Commit();
+  return c;
+}
+
+/// Submit a qualification you (or somebody you act for) hold, for staff to verify — a certificate from elsewhere. It counts
+/// once verified. A kind that needs evidence waits for a file (`AttachEvidence`) before it can be.
+[Server, Authorize(IsAuthenticated)]
+public Qualification SubmitQualification(Principal holder, string kindKey, DateOnly issuedOn, string reference = "", string issuedBy = "") {
+  if (!App.Setting<QualificationsSetup>().HoldersSubmit) { throw new ValidationException("Qualifications are recorded by staff here."); }
+  if (!ActsForHolder(holder)) { throw new NotAuthorized("You can only submit your own qualifications, or those of somebody you act for."); }
+  var kind = KindToIssue(kindKey);
+  if (kind.SignedByHolder) { throw new ValidationException(kind.Name + " is signed, not submitted."); }
+  if (issuedOn > QualificationToday()) { throw new ValidationException("A qualification cannot be issued in the future."); }
+  var c = new Qualification { Holder = holder, Kind = kind, IssuedOn = issuedOn, ValidUntil = QualificationValidUntil(issuedOn, kind.ValidForMonths),
+                           Reference = reference.Trim(), IssuedBy = issuedBy.Trim(), RecordedBy = CurrentPrincipal(),
+                           Status = QualificationStatus.Submitted };
+  Raise(new QualificationSubmitted { Qualification = c });
+  UnitOfWork.Commit();
+  return c;
+}
+
+/// Keep a file just uploaded privately by the caller as theirs — a scan, a photo — ready to attach to a qualification.
+/// Refused, with the reason, for anything but a PDF or a picture.
+[Server, Authorize(IsAuthenticated)]
+public FileAsset KeepEvidence(UploadedFile upload) {
+  if (!upload.Path.StartsWith("uploads/") || !File.IsOwnUpload(upload.Path)) {
+    throw new ValidationException("Upload the file again, from this page.");
+  }
+  var type = upload.ContentType;
+  if (type != "application/pdf" && !type.StartsWith("image/")) { throw new ValidationException("Evidence is a PDF or a picture."); }
+  var bytes = File.ReadAllBytes(upload.Path);
+  var file = File.Create(upload.FileName, type, bytes);
+  File.Delete(upload.Path);
+  UnitOfWork.Commit();
+  return file;
+}
+
+/// Attach `file` — the caller's own (`KeepEvidence`) — to a qualification: by the holder (or whoever acts for them) while
+/// it waits for verification, by staff who issue at any time. Whoever may read the qualification may then read the file.
+[Server, Authorize(IsAuthenticated)]
+public QualificationEvidence AttachEvidence(Qualification qualification, FileAsset file) {
+  if (!IssuesQualifications && !(ActsForHolder(qualification.Holder) && qualification.Status == QualificationStatus.Submitted)) {
+    throw new NotAuthorized("Evidence is added while a qualification waits for verification, or by staff.");
+  }
+  var e = new QualificationEvidence { Qualification = qualification, File = file, Name = file.Name, AddedBy = CurrentPrincipal() };
+  UnitOfWork.Commit();
+  return e;
+}
+
+/// Staff accept a submitted qualification: it counts from now. Refused when its kind needs evidence and none is attached.
+[Server, Authorize(IssuesQualifications)]
+public void VerifyQualification(Qualification qualification, string note = "") {
+  if (qualification.Status != QualificationStatus.Submitted) { throw new ValidationException("That qualification is not waiting for verification."); }
+  if (qualification.Kind.NeedsEvidence && !QualificationEvidence.Any(e => e.Qualification == qualification)) {
+    throw new ValidationException(qualification.Kind.Name + " needs evidence before it is verified.");
+  }
+  qualification.Status = QualificationStatus.Recorded;
+  qualification.VerifiedBy = CurrentPrincipal();
+  qualification.VerifiedAt = DateTime.UtcNow;
+  if (note.Trim() != "") { qualification.Note = note.Trim(); }
+  QualificationLife.RaiseChanged(qualification);
+  Raise(new QualificationRecorded { Qualification = qualification });
+  UnitOfWork.Commit();
+}
+
+/// Staff do not accept a submitted qualification, saying why.
+[Server, Authorize(IssuesQualifications)]
+public void RejectQualification(Qualification qualification, string reason) {
+  if (string.IsNullOrWhiteSpace(reason)) { throw new ValidationException("Say why it is not accepted."); }
+  if (qualification.Status != QualificationStatus.Submitted) { throw new ValidationException("That qualification is not waiting for verification."); }
+  qualification.Status = QualificationStatus.Rejected;
+  qualification.ClosedBy = CurrentPrincipal();
+  qualification.ClosedAt = DateTime.UtcNow;
+  qualification.Reason = reason.Trim();
+  QualificationLife.RaiseChanged(qualification);
+  Raise(new QualificationRejected { Qualification = qualification });
+  UnitOfWork.Commit();
+}
+
+/// Take a qualification back, saying why. The row stays, with the reason; it stops counting at once.
+[Server, Authorize(IssuesQualifications)]
+public void RevokeQualification(Qualification qualification, string reason) {
+  if (string.IsNullOrWhiteSpace(reason)) { throw new ValidationException("Say why the qualification is revoked."); }
+  if (qualification.Status == QualificationStatus.Revoked) { throw new ValidationException("That qualification is already revoked."); }
+  qualification.Status = QualificationStatus.Revoked;
+  qualification.ClosedBy = CurrentPrincipal();
+  qualification.ClosedAt = DateTime.UtcNow;
+  qualification.Reason = reason.Trim();
+  QualificationLife.RaiseChanged(qualification);
+  Raise(new QualificationRevoked { Qualification = qualification });
+  UnitOfWork.Commit();
+}

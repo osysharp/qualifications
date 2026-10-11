@@ -1,0 +1,63 @@
+// Each qualification's clock, as the system: the notice before it lapses and word when it does — both only when nothing
+// newer of its kind replaces it, so a person who renewed in time hears nothing. A qualification that does not lapse, or one
+// waiting for verification, sleeps until something changes it.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Workflow;
+
+public workflow QualificationLife {
+  Tracks    = Qualification.Phase;
+  Autostart = true;
+  Initial   = Running;
+
+  /// Verified, revoked or rejected — the clock is set again.
+  event Changed();
+
+  state Running {
+    Expire { Within = UntilQualificationTick(this.Item); Accrues = false; }
+    on Expire {
+      if (TickQualification(this.Item)) { goto Over; }
+      goto Running;
+    }
+    on Changed {
+      if (this.Item.Status == QualificationStatus.Revoked || this.Item.Status == QualificationStatus.Rejected) { goto Over; }
+      goto Running;
+    }
+  }
+
+  terminal success Over { }
+}
+
+/// The moment a qualification stops holding: the start of the day after its last.
+public DateTime QualificationLapsesAt(Qualification c) { return c.ValidUntil!.Value.AddDays(1).ToDateTime(new TimeOnly(0, 0)); }
+
+/// How long until something is due — the notice, or the lapse — never below zero. Nothing is due for one that does not
+/// lapse or is not in force.
+public TimeSpan UntilQualificationTick(Qualification c) {
+  if (c.Status != QualificationStatus.Recorded || c.ValidUntil == null) { return TimeSpan.FromDays(36500); }
+  var now = DateTime.UtcNow;
+  var lapses = QualificationLapsesAt(c);
+  var days = NoticeDaysOf(c);
+  var notice = c.ValidUntil.Value.AddDays(-days).ToDateTime(new TimeOnly(0, 0));
+  var at = days > 0 && c.NoticeFor != c.ValidUntil && notice < lapses ? notice : lapses;
+  return at <= now ? TimeSpan.Zero : at - now;
+}
+
+/// Does what is due now; true when the qualification's clock is over (it lapsed, or it is no longer in force).
+bool TickQualification(Qualification c) {
+  if (c.Status == QualificationStatus.Revoked || c.Status == QualificationStatus.Rejected) { return true; }
+  if (c.Status != QualificationStatus.Recorded || c.ValidUntil == null) { return false; }
+  var now = DateTime.UtcNow;
+  if (QualificationLapsesAt(c) <= now) {
+    // One put on record after it had already lapsed (an old certificate entered for the history) is not news.
+    if (!Renewed(c) && c.RecordedAt < QualificationLapsesAt(c)) { Raise(new QualificationExpired { Qualification = c }); }
+    return true;
+  }
+  var days = NoticeDaysOf(c);
+  if (days > 0 && c.NoticeFor != c.ValidUntil && c.ValidUntil.Value.AddDays(-days).ToDateTime(new TimeOnly(0, 0)) <= now) {
+    c.NoticeFor = c.ValidUntil;
+    if (!Renewed(c)) { Raise(new QualificationExpiringSoon { Qualification = c }); }
+  }
+  return false;
+}

@@ -1,0 +1,64 @@
+// The rules declared on the data, each proved as the person it is about.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+
+[Test(Lake)]
+[runas(Ada)]
+void a_customer_reads_their_own_qualifications_and_nobody_elses() {
+  Assert.Equal(1, Qualification.Count());
+  Assert.Equal(0, QualificationsOf(Bo).Count);
+  runas(Dan) { Assert.Equal(2, Qualification.Count()); }
+}
+
+[Test(Lake)]
+[runas(Ada)]
+void a_customer_cannot_record_verify_or_revoke_anything() {
+  Assert.Throws(() => RecordQualification(Ada, "skipper-licence"));
+  var mine = CheckQualification(Ada, "safety-briefing").Qualification!;
+  Assert.Throws(() => RevokeQualification(mine, "mine"));
+  var submitted = SubmitQualification(Ada, "first-aid", new DateOnly(2026, 10, 1));
+  Assert.Throws(() => VerifyQualification(submitted));
+  Assert.Denied(() => { new Qualification { Holder = Ada, Kind = mine.Kind, IssuedOn = new DateOnly(2026, 11, 1) }; UnitOfWork.Commit(); });
+  Assert.Denied(() => { submitted.Status = QualificationStatus.Recorded; UnitOfWork.Commit(); });
+  Assert.Throws(() => { mine.ValidUntil = new DateOnly(2030, 1, 1); UnitOfWork.Commit(); });
+  Assert.Denied(() => { mine.Delete(); UnitOfWork.Commit(); });
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void even_staff_change_a_qualification_only_through_the_kits_functions() {
+  var c = CheckQualification(Ada, "safety-briefing").Qualification!;
+  Assert.Denied(() => { c.Status = QualificationStatus.Revoked; UnitOfWork.Commit(); });
+  Assert.Denied(() => { c.Reason = "quietly"; UnitOfWork.Commit(); });
+  Assert.Denied(() => { c.Delete(); UnitOfWork.Commit(); });
+  Assert.Equal("Say why the qualification is revoked.", Assert.Throws<ValidationException>(() => RevokeQualification(c, " ")).Message);
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void a_dock_hand_cannot_change_what_kinds_exist_or_what_a_waiver_says() {
+  var kind = QualificationKind.Single(k => k.Key == "hire-waiver");
+  Assert.Denied(() => { kind.ValidForMonths = 120; UnitOfWork.Commit(); });
+  Assert.Throws(() => PublishQualificationText(kind, "Nothing applies."));
+  runas(Mia) { kind.ValidForMonths = 24; UnitOfWork.Commit(); }
+  Assert.Equal(24, QualificationKind.Single(k => k.Key == "hire-waiver").ValidForMonths);
+}
+
+[Test(Lake)]
+void a_visitor_reads_the_kinds_and_the_waiver_text_and_nothing_else() {
+  Assert.Equal(4, QualificationKind.Count());
+  Assert.Contains("life jacket", WaiverText().Body);
+  Assert.Equal(0, Qualification.Count());
+}
+
+[Test(Lake)]
+[runas(Dan)]
+void the_app_is_told_once_per_record_and_revocation() {
+  var c = RecordQualification(Bo, "safety-briefing");
+  RevokeQualification(c, "Recorded twice");
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "recorded" && h.Detail == "safety-briefing:Bo Lindqvist"));
+  Assert.Equal(1, HeardCount("revoked"));
+}

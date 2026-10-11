@@ -1,0 +1,24 @@
+// Forgetting a person: a privacy erasure (Osysharp.Privacy.Qualifications calls it), or somebody who has left.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+/// Remove every qualification `person` holds, with its evidence and its files. Qualifications they recorded or signed for
+/// somebody else stay: they are the other person's record. Answers how many rows went.
+[Server, Authorize(IssuesQualifications)]
+[SuppressWarning("cost-unbounded-read")]   // an erasure takes every row of one person, however many there are
+public int EraseQualificationsOf(Principal person) {
+  var n = 0;
+  var held = Qualification.Where(c => c.Holder == person).Select(c => c.Id).ToList();
+  foreach (var e in QualificationEvidence.Include(e => e.File).Where(e => held.Contains(e.Qualification.Id)).ToList()) {
+    var file = e.File;
+    e.Delete();
+    file.Delete();
+    n = n + 1;
+  }
+  foreach (var c in Qualification.Where(c => c.Holder == person).ToList()) { c.Delete(); n = n + 1; }
+  UnitOfWork.Commit();
+  return n;
+}

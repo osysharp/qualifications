@@ -1,0 +1,157 @@
+// What the pages read — shaped once here, so each page is drawing and nothing else.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Identity;
+
+/// A file behind a qualification, as a page links it.
+public class EvidenceLine {
+  public Guid File;
+  public string Name = "";
+}
+
+/// A qualification as a page shows it.
+public class QualificationCard {
+  public Guid Id;
+  public string Kind = "";
+  public string Category = "";
+  /// "Valid", "Expires soon", "Expired", "Waiting for verification", "Not accepted", "Revoked", "Not yet valid".
+  public string Standing = "";
+  public bool Good;
+  public bool Warn;
+  /// "Until 2 May 2027", "Does not lapse", "Expired on …".
+  public string Until = "";
+  public string Reference = "";
+  public string IssuedBy = "";
+  /// "Signed by Ada Moreno as “Ada Moreno” on 2 November 2026 · text version 2".
+  public string Signed = "";
+  public string Reason = "";
+  public string TextBody = "";
+  public List<EvidenceLine> Evidence = [];
+  public bool CanAttach;
+  public bool CanRevoke;
+}
+
+/// A kind waiting for the person's signature, with the exact text they sign.
+public class ToSign {
+  public Guid Kind;
+  public string Name = "";
+  public string Description = "";
+  public Guid Text;
+  public int Version;
+  public string Body = "";
+}
+
+/// One person's qualifications as the caller may see them.
+public class QualificationWallet {
+  public Guid Person;
+  public string Name = "";
+  public List<QualificationCard> Cards = [];
+  public List<ToSign> Unsigned = [];
+}
+
+/// A qualification in one of the desk's lists.
+public class QualificationLine {
+  public Guid Id;
+  public Guid Person;
+  public string Name = "";
+  public string Kind = "";
+  public string Detail = "";
+  public List<EvidenceLine> Evidence = [];
+}
+
+/// Somebody the desk may look up.
+public class QualificationPerson {
+  public Guid Id;
+  public string Name = "";
+  public string Email = "";
+}
+
+/// A person's name as the pages write it.
+public string QualificationName(Principal p) { return p.DisplayName != null && p.DisplayName != "" ? p.DisplayName : p.Email; }
+
+List<EvidenceLine> EvidenceOf(Qualification c) {
+  return QualificationEvidence.Where(e => e.Qualification == c).OrderBy(e => e.AddedAt).Take(20).ToList()
+    .Select(e => new EvidenceLine { File = e.File.Id, Name = e.Name }).ToList();
+}
+
+/// A qualification as the pages show it.
+public QualificationCard QualificationCardOf(Qualification c) {
+  var today = QualificationToday();
+  var holds = QualificationHoldsOn(c, today);
+  var soon = holds && c.ValidUntil != null && c.ValidUntil.Value.AddDays(-NoticeDaysOf(c)) < today;
+  var lapsed = c.Status == QualificationStatus.Recorded && c.ValidUntil != null && c.ValidUntil.Value < today;
+  var standing = c.Status == QualificationStatus.Revoked ? "Revoked"
+    : c.Status == QualificationStatus.Rejected ? "Not accepted"
+    : c.Status == QualificationStatus.Submitted ? "Waiting for verification"
+    : lapsed ? (Renewed(c) ? "Renewed" : "Expired")
+    : c.IssuedOn > today ? "Not yet valid"
+    : soon ? "Expires soon" : "Valid";
+  return new QualificationCard {
+    Id = c.Id, Kind = c.Kind.Name, Category = c.Kind.Category.Label, Standing = standing,
+    Good = holds && !soon, Warn = soon || c.Status == QualificationStatus.Submitted,
+    Until = c.ValidUntil == null ? "Does not lapse" : (lapsed ? "Expired on " : "Until ") + QualificationDay(c.ValidUntil.Value),
+    Reference = c.Reference, IssuedBy = c.IssuedBy,
+    Signed = c.SignedAt == null ? "" : "Signed by " + QualificationName(c.SignedBy!) + " as “" + c.SignedName + "” on "
+             + QualificationDay(DateOnly.FromDateTime(c.SignedAt.Value)) + (c.Text != null ? " · text version " + c.Text!.Version : ""),
+    Reason = c.Reason, TextBody = c.Text == null ? "" : c.Text!.Body,
+    Evidence = EvidenceOf(c),
+    CanAttach = c.Status == QualificationStatus.Submitted,
+    CanRevoke = c.Status == QualificationStatus.Recorded && !lapsed,
+  };
+}
+
+/// `person`'s qualifications, and what they still have to sign — the pages' one read. Null: the signed-in person.
+[Server, Authorize(IsAuthenticated)]
+public QualificationWallet QualificationWalletOf(Guid? person = null) {
+  var who = person == null ? CurrentPrincipal() : Principal.FirstOrDefault(p => p.Id == person.Value);
+  var wallet = new QualificationWallet();
+  if (who == null) { return wallet; }
+  wallet.Person = who.Id;
+  wallet.Name = QualificationName(who);
+  wallet.Cards = QualificationsOf(who).Select(c => QualificationCardOf(c)).ToList();
+  foreach (var k in StillToSign(who)) {
+    var text = CurrentText(k);
+    if (text == null) { continue; }
+    wallet.Unsigned.Add(new ToSign { Kind = k.Id, Name = k.Name, Description = k.Description, Text = text.Id, Version = text.Version, Body = text.Body });
+  }
+  return wallet;
+}
+
+/// The kinds a person may submit themselves.
+public List<QualificationKind> SubmittableKinds() {
+  return QualificationKind.Where(k => k.Active && !k.SignedByHolder).OrderBy(k => k.SortOrder).ThenBy(k => k.Name).Take(100).ToList();
+}
+
+QualificationLine LineOf(Qualification c, string detail) {
+  return new QualificationLine { Id = c.Id, Person = c.Holder.Id, Name = QualificationName(c.Holder), Kind = c.Kind.Name, Detail = detail,
+                              Evidence = EvidenceOf(c) };
+}
+
+/// The desk's lists: lapsing within `days`, lapsed within `days`, waiting for verification.
+public class QualificationDeskView {
+  public List<QualificationLine> Lapsing = [];
+  public List<QualificationLine> Lapsed = [];
+  public List<QualificationLine> Waiting = [];
+}
+
+[Server, Authorize(ChecksQualifications)]
+public QualificationDeskView QualificationDeskOf(int days) {
+  var view = new QualificationDeskView();
+  view.Lapsing = LapsingWithin(days).Select(c => LineOf(c, "Until " + QualificationDay(c.ValidUntil!.Value))).ToList();
+  view.Lapsed = LapsedWithin(days).Select(c => LineOf(c, "Expired on " + QualificationDay(c.ValidUntil!.Value))).ToList();
+  if (IssuesQualifications) {
+    view.Waiting = AwaitingVerification().Select(c => LineOf(c, "Issued " + QualificationDay(c.IssuedOn)
+      + (c.Reference != "" ? " · " + c.Reference : "") + (c.IssuedBy != "" ? " · " + c.IssuedBy : ""))).ToList();
+  }
+  return view;
+}
+
+/// People whose name or address holds `search` (at most 20).
+[Server, Authorize(ChecksQualifications)]
+public List<QualificationPerson> FindQualificationHolders(string search) {
+  var q = search.Trim();
+  if (q.Length < 2) { return []; }
+  return Principal.Where(p => p.DisplayName.Contains(q) || p.Email.Contains(q)).OrderBy(p => p.DisplayName).Take(20).ToList()
+    .Select(p => new QualificationPerson { Id = p.Id, Name = QualificationName(p), Email = p.Email }).ToList();
+}

@@ -1,0 +1,51 @@
+// The boat hire every test starts from, on Monday 2 November 2026: customers Ada and Bo (Bo's briefing lapsed in
+// September), Eve with nothing, a dock hand and a manager, four kinds and the hire waiver's first text.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+
+principal Ada => User.Single(u => u.Email == "ada@lake.test");
+principal Bo => User.Single(u => u.Email == "bo@lake.test");
+principal Eve => User.Single(u => u.Email == "eve@lake.test");
+principal Dan => User.Single(u => u.Email == "dan@lake.test");
+principal Mia => User.Single(u => u.Email == "mia@lake.test");
+
+DateOnly Day(int month, int day) { return new DateOnly(2026, month, day); }
+
+[TestFixture]
+void Lake() {
+  TestClock.Set(new DateTime(2026, 11, 2, 8, 0, 0));
+  var ada = new User { Email = "ada@lake.test", DisplayName = "Ada Moreno" };
+  var bo = new User { Email = "bo@lake.test", DisplayName = "Bo Lindqvist" };
+  var eve = new User { Email = "eve@lake.test", DisplayName = "Eve Okafor" };
+  var dan = new User { Email = "dan@lake.test", DisplayName = "Dan Reyes" };
+  var mia = new User { Email = "mia@lake.test", DisplayName = "Mia Chen" };
+  new RoleGrant { Member = ada, Role = HireRole.Customer };
+  new RoleGrant { Member = bo, Role = HireRole.Customer };
+  new RoleGrant { Member = eve, Role = HireRole.Customer };
+  new RoleGrant { Member = dan, Role = HireRole.DockHand };
+  new RoleGrant { Member = mia, Role = HireRole.Manager };
+  new QualificationKind { Key = "skipper-licence", Name = "Skipper's licence", Category = QualificationCategory.Licence, ValidForMonths = 60,
+                       NeedsEvidence = true, SortOrder = 1, Description = "A powerboat or sailing licence from a recognised body." };
+  var briefing = new QualificationKind { Key = "safety-briefing", Name = "Safety briefing", Category = QualificationCategory.Induction,
+                                      ValidForMonths = 12, SortOrder = 2, Description = "Life jackets, the lake's rules, what to do if the engine stops." };
+  var waiver = new QualificationKind { Key = "hire-waiver", Name = "Hire waiver", Category = QualificationCategory.Waiver, ValidForMonths = 12,
+                                    SignedByHolder = true, SortOrder = 3, Description = "The terms a boat is hired on." };
+  new QualificationKind { Key = "first-aid", Name = "First aid certificate", Category = QualificationCategory.Certificate, ValidForMonths = 36,
+                       NoticeDays = 60, SortOrder = 4 };
+  new QualificationText { Kind = waiver, Version = 1, Body = "I take a boat out at my own risk.\n\nI wear a life jacket at all times on the water." };
+  new Qualification { Holder = ada, Kind = briefing, IssuedOn = Day(3, 1), ValidUntil = Day(3, 1).AddMonths(12).AddDays(-1), RecordedBy = dan };
+  new Qualification { Holder = bo, Kind = briefing, IssuedOn = new DateOnly(2025, 10, 1), ValidUntil = Day(9, 30), RecordedBy = dan };
+}
+
+QualificationText WaiverText() { return QualificationText.Where(t => t.Kind.Key == "hire-waiver").OrderByDescending(t => t.Version).First(); }
+
+int HeardCount(string what) { return Heard.Count(h => h.Event == what); }
+
+/// Ada signs the hire waiver for herself.
+Qualification AdaSigns() {
+  Qualification? c = null;
+  runas(Ada) { c = SignQualification(Ada, WaiverText(), "Ada Moreno"); }
+  return c!;
+}

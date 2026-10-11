@@ -1,0 +1,165 @@
+// The answer other code asks for: does this person hold what is needed, on this day — and when not, why not, in a
+// sentence a person can be shown. A door, a booking, a shift rota, a checkout all ask the same one call.
+
+namespace Osysharp.Qualifications;
+
+using Osysharp.Identity;
+
+/// What a check found. ⚠ Appended, never inserted.
+public enum QualificationState {
+  /// Holds one in force that day.
+  [Label("Valid")] Valid,
+  /// Held one, and it lapsed.
+  [Label("Expired")] Expired,
+  /// Has none on record (or only one that starts later).
+  [Label("Missing")] Missing,
+  /// The one held was revoked.
+  [Label("Revoked")] Revoked,
+  /// Submitted one, still waiting for verification.
+  [Label("Waiting for verification")] Waiting,
+}
+
+/// What a check found: the state, a sentence a person can read, and the qualification that decided it.
+public class QualificationCheck {
+  public string Kind = "";
+  public QualificationState State;
+  public bool IsValid;
+  /// Valid, and lapsing within its notice — time to renew.
+  public bool ExpiresSoon;
+  public DateOnly? ValidUntil;
+  public string Reason = "";
+  public Qualification? Qualification;
+}
+
+/// Does `c` hold on day `d`: in force, issued by then, not past its last day.
+public bool QualificationHoldsOn(Qualification c, DateOnly d) {
+  if (c.Status != QualificationStatus.Recorded) { return false; }
+  if (c.IssuedOn > d) { return false; }
+  return c.ValidUntil == null || d <= c.ValidUntil.Value;
+}
+
+/// The days before `c` lapses that its holder is told — its kind's, else the app's.
+public int NoticeDaysOf(Qualification c) { return c.Kind.NoticeDays ?? App.Setting<QualificationsSetup>().RenewalNoticeDays; }
+
+/// Does `holder` hold a qualification of kind `kindKey` on day `on` (today by default) — and if not, why not? Of several,
+/// the most favourable counts: in force beats waiting beats lapsed beats revoked beats nothing. Read as the caller: a
+/// person asks about themself (or somebody they act for), whoever `ChecksQualifications` about anybody — anyone else is
+/// told there is nothing on record. An unknown key is an error; a retired kind is Missing.
+[SuppressWarning("cost-unbounded-read")]   // one person's qualifications of one kind: a handful, and truncating could hide the valid one
+public QualificationCheck CheckQualification(Principal holder, string kindKey, DateOnly? on = null) {
+  var kind = QualificationKind.FirstOrDefault(k => k.Key == kindKey);
+  if (kind == null) { throw new ValidationException("There is no qualification kind '" + kindKey + "'."); }
+  var day = on ?? QualificationToday();
+  var name = kind.Name;
+  if (!kind.Active) {
+    return new QualificationCheck { Kind = kindKey, State = QualificationState.Missing, Reason = name + " is no longer recognised." };
+  }
+  var held = Qualification.Where(c => c.Holder == holder && c.Kind == kind).ToList();
+  var valid = held.Where(c => QualificationHoldsOn(c, day))
+                  .OrderByDescending(c => c.ValidUntil == null ? DateOnly.MaxValue : c.ValidUntil.Value).FirstOrDefault();
+  if (valid != null) {
+    var soon = valid.ValidUntil != null && valid.ValidUntil.Value.AddDays(-NoticeDaysOf(valid)) < day;
+    return new QualificationCheck {
+      Kind = kindKey, State = QualificationState.Valid, IsValid = true, ExpiresSoon = soon, ValidUntil = valid.ValidUntil, Qualification = valid,
+      Reason = valid.ValidUntil == null ? name + " is valid and does not lapse." : name + " is valid until " + QualificationDay(valid.ValidUntil.Value) + ".",
+    };
+  }
+  var waiting = held.Where(c => c.Status == QualificationStatus.Submitted).OrderByDescending(c => c.RecordedAt).FirstOrDefault();
+  if (waiting != null) {
+    return new QualificationCheck { Kind = kindKey, State = QualificationState.Waiting, ValidUntil = waiting.ValidUntil, Qualification = waiting,
+                                 Reason = name + " is waiting for verification." };
+  }
+  var later = held.Where(c => c.Status == QualificationStatus.Recorded && c.IssuedOn > day).OrderBy(c => c.IssuedOn).FirstOrDefault();
+  if (later != null) {
+    return new QualificationCheck { Kind = kindKey, State = QualificationState.Missing, ValidUntil = later.ValidUntil, Qualification = later,
+                                 Reason = name + " holds only from " + QualificationDay(later.IssuedOn) + "." };
+  }
+  var lapsed = held.Where(c => c.Status == QualificationStatus.Recorded && c.ValidUntil != null).OrderByDescending(c => c.ValidUntil).FirstOrDefault();
+  if (lapsed != null) {
+    return new QualificationCheck { Kind = kindKey, State = QualificationState.Expired, ValidUntil = lapsed.ValidUntil, Qualification = lapsed,
+                                 Reason = name + " expired on " + QualificationDay(lapsed.ValidUntil!.Value) + "." };
+  }
+  var revoked = held.Where(c => c.Status == QualificationStatus.Revoked).OrderByDescending(c => c.ClosedAt).FirstOrDefault();
+  if (revoked != null) {
+    return new QualificationCheck { Kind = kindKey, State = QualificationState.Revoked, Qualification = revoked,
+                                 Reason = name + " was revoked: " + revoked.Reason + "." };
+  }
+  return new QualificationCheck { Kind = kindKey, State = QualificationState.Missing,
+                               Reason = kind.SignedByHolder ? name + " has not been signed." : "No " + name + " on record." };
+}
+
+/// `CheckQualification(…).IsValid`.
+public bool HasValidQualification(Principal holder, string kindKey, DateOnly? on = null) {
+  return CheckQualification(holder, kindKey, on).IsValid;
+}
+
+/// Everything `holder` lacks of `kindKeys` on `on` — the checks that are not valid, in the order asked. Empty when they
+/// hold them all.
+public List<QualificationCheck> MissingQualifications(Principal holder, List<string> kindKeys, DateOnly? on = null) {
+  List<QualificationCheck> missing = [];
+  foreach (var key in kindKeys) {
+    var check = CheckQualification(holder, key, on);
+    if (!check.IsValid) { missing.Add(check); }
+  }
+  return missing;
+}
+
+/// Why `holder` may not go ahead for want of `kindKeys` — the first missing qualification's sentence — or "" when they hold
+/// them all. The one call a door, a booking or a rota asks: `var why = QualificationGap(person, ["waiver", "induction"]);`.
+public string QualificationGap(Principal holder, List<string> kindKeys, DateOnly? on = null) {
+  var missing = MissingQualifications(holder, kindKeys, on);
+  return missing.Count == 0 ? "" : missing[0].Reason;
+}
+
+/// Every qualification of `holder` the caller may see, newest first.
+[SuppressWarning("cost-unbounded-read")]   // one person's qualifications: a handful
+public List<Qualification> QualificationsOf(Principal holder) {
+  return Qualification.Include(c => c.Kind).Where(c => c.Holder == holder).OrderByDescending(c => c.IssuedOn).ToList();
+}
+
+/// Qualifications in force that lapse within `days` days and that nothing newer of their kind replaces — whom to ask to
+/// renew — soonest first.
+[Server, Authorize(ChecksQualifications)]
+public List<Qualification> LapsingWithin(int days, int take = 200) {
+  var today = QualificationToday();
+  var horizon = today.AddDays(days);
+  var soon = Qualification.Include(c => c.Kind).Include(c => c.Holder)
+    .Where(c => c.Status == QualificationStatus.Recorded && c.ValidUntil != null && c.ValidUntil >= today && c.ValidUntil <= horizon)
+    .OrderBy(c => c.ValidUntil).Take(take).ToList();
+  return soon.Where(c => !Renewed(c)).ToList();
+}
+
+/// Qualifications that lapsed in the last `days` days and were not renewed — who is no longer covered.
+[Server, Authorize(ChecksQualifications)]
+public List<Qualification> LapsedWithin(int days, int take = 200) {
+  var today = QualificationToday();
+  var since = today.AddDays(-days);
+  var gone = Qualification.Include(c => c.Kind).Include(c => c.Holder)
+    .Where(c => c.Status == QualificationStatus.Recorded && c.ValidUntil != null && c.ValidUntil < today && c.ValidUntil >= since)
+    .OrderByDescending(c => c.ValidUntil).Take(take).ToList();
+  return gone.Where(c => !Renewed(c)).ToList();
+}
+
+/// Is there a qualification of the same kind for the same person in force past this one's end — a renewal?
+public bool Renewed(Qualification c) {
+  if (c.ValidUntil == null) { return false; }
+  var end = c.ValidUntil.Value;
+  var holder = c.Holder;
+  var kind = c.Kind;
+  var id = c.Id;
+  return Qualification.Any(o => o.Id != id && o.Holder == holder && o.Kind == kind && o.Status == QualificationStatus.Recorded
+                             && (o.ValidUntil == null || o.ValidUntil > end));
+}
+
+/// Submitted qualifications waiting for staff, oldest first.
+[Server, Authorize(IssuesQualifications)]
+public List<Qualification> AwaitingVerification(int take = 100) {
+  return Qualification.Include(c => c.Kind).Include(c => c.Holder).Where(c => c.Status == QualificationStatus.Submitted)
+    .OrderBy(c => c.RecordedAt).Take(take).ToList();
+}
+
+/// The kinds `holder` signs themselves and does not hold in force today — the waivers waiting for their signature.
+public List<QualificationKind> StillToSign(Principal holder) {
+  var kinds = QualificationKind.Where(k => k.Active && k.SignedByHolder).OrderBy(k => k.SortOrder).ThenBy(k => k.Name).Take(50).ToList();
+  return kinds.Where(k => !HasValidQualification(holder, k.Key)).ToList();
+}

@@ -1,0 +1,27 @@
+// Osysharp.Qualifications — what a person holds that lets them do something: a licence, a certificate, an induction, a
+// background check, a signed waiver. When it was issued, until when it holds, who recorded or signed it, the evidence,
+// and one call that answers whether somebody holds it now — and, when not, why not, in a sentence.
+//
+// ⚑ NOT SIGN-IN. "Qualification" here is a qualification or an agreement a PERSON holds, never a password or a key; signing
+//   in is Osysharp.UserAccounts.
+// ⚑ THE APP SAYS WHO: `policy IssuesQualifications => IsStaff;` (records, verifies and revokes qualifications, and reads
+//   everybody's), `policy ManagesQualificationKinds => IsAdmin;` (what kinds exist, the text a waiver is signed on), who
+//   may look somebody up (`ChecksQualifications`) and who acts for whom (`ActsForHolder(holder)` — a parent for a child).
+// ⚑ EVERY RECORD IS KEPT. A qualification is never edited into something else and never deleted: it is renewed by a new
+//   one, revoked or rejected with the reason. A waiver keeps the exact version of the text that was signed, and nobody
+//   signs a version they were not shown.
+package Osysharp.Qualifications {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "qualifications a person holds — licences, certificates, inductions, checks and signed waivers — of kinds with a validity in months (or none), recorded by staff or submitted with evidence for verification, a waiver signed on the exact text version the person was shown (by them, or by whoever acts for them), revocation and rejection with the reason, a renewal notice before each lapses and word when it does, and one call answering whether somebody holds what is needed now and why not — with a person's own page, a staff desk of what lapses soon and what waits for verification, and a kinds page with the waiver texts.";
+  pairsWith   "Osysharp.UserAccounts: accounts for people who never sign in (a child, a walk-in) whose waiver a guardian signs";
+  model "model/**/*.osy";
+  // The personal data its own fields hold: a reference (a licence number), the name typed as a signature, and why a
+  // qualification was revoked or rejected.
+  personal Content;
+  use Osysharp.Identity@0;   // `Principal`: who holds a qualification
+  use Osysharp.Storage;      // the evidence: a scan of a certificate, a photo of a licence
+  use Osysharp.Ui;           // the pages
+  use Osysharp.Workflow;     // the notice before each lapses, and word when it does
+  tests "tests";
+}

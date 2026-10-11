@@ -1,0 +1,70 @@
+// A waiver is signed on the exact text the person was shown: by them, or by a parent for a child who never signs in.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+using Osysharp.Workflow;
+
+[Test(Lake)]
+[runas(Ada)]
+void a_customer_signs_the_waiver_on_the_text_they_were_shown_and_it_is_kept() {
+  var text = WaiverText();
+  var c = SignQualification(Ada, text, "Ada Moreno");
+  var kept = Qualification.Single(x => x.Id == c.Id);
+  Assert.Equal(1, kept.Text!.Version);
+  Assert.Equal("Ada Moreno", kept.SignedName);
+  Assert.Equal(Ada.Id, kept.SignedBy!.Id);
+  Assert.Equal(new DateOnly(2027, 11, 1), kept.ValidUntil);
+  Assert.Contains("life jacket", kept.Text!.Body);
+  Assert.True(HasValidQualification(Ada, "hire-waiver"));
+  Assert.Equal(0, StillToSign(Ada).Count);
+}
+
+[Test(Lake)]
+[runas(Ada)]
+void a_waiver_cannot_be_signed_on_an_old_text_or_without_a_name() {
+  var old = WaiverText();
+  runas(Mia) { PublishQualificationText(old.Kind, "I take a boat out at my own risk.\n\nI wear a life jacket.\n\nI return the boat by sunset."); }
+  Assert.Equal("The text of Hire waiver has changed since you read it — read the new version and sign that.",
+               Assert.Throws<ValidationException>(() => SignQualification(Ada, old, "Ada Moreno")).Message);
+  Assert.Equal("Type your full name to sign.", Assert.Throws<ValidationException>(() => SignQualification(Ada, WaiverText(), " ")).Message);
+  Assert.Equal(2, SignQualification(Ada, WaiverText(), "Ada Moreno").Text!.Version);
+}
+
+[Test(Lake)]
+[runas(Ada)]
+void a_parent_signs_for_a_child_who_never_signs_in_and_nobody_else_can() {
+  var noor = ChildOf("Noor Moreno");
+  var c = SignQualification(noor, WaiverText(), "Ada Moreno, for Noor");
+  Assert.Equal(Ada.Id, c.SignedBy!.Id);
+  Assert.Equal(noor.Id, c.Holder.Id);
+  Assert.True(HasValidQualification(noor, "hire-waiver"));
+  runas(Bo) { Assert.Throws(() => SignQualification(noor, WaiverText(), "Bo Lindqvist")); }
+}
+
+[Test(Lake)]
+[runas(Ada)]
+void a_kind_staff_record_cannot_be_signed() {
+  var briefing = QualificationKind.Single(k => k.Key == "safety-briefing");
+  runas(Mia) { PublishQualificationText(briefing, "Wear the life jacket."); }
+  Assert.Equal("Safety briefing is recorded by staff, not signed.",
+               Assert.Throws<ValidationException>(() => SignQualification(Ada, QualificationText.Single(t => t.Kind.Key == "safety-briefing"), "Ada")).Message);
+}
+
+[Test(Lake)]
+[runas(Mia)]
+void a_new_wording_is_a_new_version_and_the_same_wording_is_not() {
+  var kind = QualificationKind.Single(k => k.Key == "hire-waiver");
+  var v1 = WaiverText();
+  Assert.Equal(v1.Id, PublishQualificationText(kind, v1.Body).Id);
+  Assert.Equal(2, PublishQualificationText(kind, "New terms.").Version);
+  Assert.Denied(() => { var t = WaiverText(); t.Body = "changed"; UnitOfWork.Commit(); });
+}
+
+/// A child's account, made by the signed-in parent (Osysharp.UserAccounts' managed accounts).
+User ChildOf(string name) {
+  var made = MakeManagedAccount(name);
+  UnitOfWork.Commit();
+  Workflow.Settle(made);
+  return ManagedAccountRequest.Single(r => r.Id == made.Id).Account!;
+}

@@ -1,0 +1,132 @@
+// The kit's pages, driven as each person drives them. `osy test --pixels` photographs each (Ui.Shot) — the README's
+// screenshots are these.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Qualifications;
+
+/// A season underway: Ada's licence on record and verified, Bo's first-aid certificate waiting, Eve's briefing lapsed
+/// last week, and the dock hand's own first aid lapsing this month.
+[TestFixture]
+void SeasonUnderway() {
+  Lake();
+  var ada = User.Single(u => u.Email == "ada@lake.test");
+  var dan = User.Single(u => u.Email == "dan@lake.test");
+  var bo = User.Single(u => u.Email == "bo@lake.test");
+  new Qualification { Holder = ada, Kind = QualificationKind.Single(k => k.Key == "skipper-licence"), IssuedOn = new DateOnly(2024, 5, 1),
+                   ValidUntil = new DateOnly(2029, 4, 30), Reference = "PB-20391", IssuedBy = "Royal Yachting Association",
+                   RecordedBy = ada, VerifiedBy = dan, VerifiedAt = DateTime.UtcNow };
+  new Qualification { Holder = bo, Kind = QualificationKind.Single(k => k.Key == "first-aid"), IssuedOn = new DateOnly(2026, 6, 12),
+                   ValidUntil = new DateOnly(2029, 6, 11), IssuedBy = "St John Ambulance", RecordedBy = bo, Status = QualificationStatus.Submitted };
+  new Qualification { Holder = User.Single(u => u.Email == "eve@lake.test"), Kind = QualificationKind.Single(k => k.Key == "safety-briefing"),
+                   IssuedOn = new DateOnly(2025, 10, 26), ValidUntil = new DateOnly(2026, 10, 25), RecordedBy = dan };
+  new Qualification { Holder = dan, Kind = QualificationKind.Single(k => k.Key == "first-aid"), IssuedOn = new DateOnly(2023, 11, 20),
+                   ValidUntil = new DateOnly(2026, 11, 19), IssuedBy = "Red Cross", RecordedBy = dan };
+}
+
+[Test(SeasonUnderway)]
+[runas(Ada)]
+void a_customer_reads_the_waiver_signs_it_and_sees_what_they_hold() {
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Ada);
+  Ui.Visit("/qualifications");
+  Assert.Visible("Hire waiver", within: "Waiting for your signature");
+  Assert.Visible("Valid", within: "Skipper's licence");
+  Assert.Visible("No. PB-20391 · Issued by Royal Yachting Association", within: "Skipper's licence");
+  Ui.Click("Read and sign", within: "Hire waiver");
+  Assert.Dialog("Hire waiver");
+  Assert.Visible("I wear a life jacket at all times on the water.", within: "The text");
+  Ui.Fill("Your full name, as your signature", "Ada Moreno");
+  Ui.Shot("qualifications-sign");
+  Ui.Click("Sign");
+  Assert.Visible("Tick that you have read it and agree.");
+  Ui.Check("I have read it and agree");
+  Ui.Click("Sign");
+  Assert.Visible("Hire waiver is signed.");
+  Assert.Visible("Signed by Ada Moreno as “Ada Moreno” on 2 November 2026 · text version 1", within: "Hire waiver");
+  Ui.Shot("qualifications-mine");
+}
+
+[Test(SeasonUnderway)]
+[runas(Bo)]
+void a_customer_submits_a_certificate_with_a_scan_for_verification() {
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Eve);
+  Ui.Visit("/qualifications");
+  Ui.Click("Add a qualification");
+  Assert.Dialog("Add a qualification");
+  Ui.Select("What it is", QualificationKind.Single(k => k.Key == "skipper-licence"));
+  Ui.Fill("Issued on", "2025-04-10");
+  Ui.Fill("Number on it", "SL-7781");
+  Ui.Fill("Issued by", "Lake Sailing Club");
+  Ui.Upload("Choose a file", "licence.pdf", "%PDF-1.4 a licence");
+  Assert.Visible("licence.pdf");
+  Ui.Click("Send for verification");
+  Assert.Visible("Skipper's licence is sent for verification.");
+  Assert.Visible("Waiting for verification", within: "Skipper's licence");
+  Assert.Visible("licence.pdf", within: "Skipper's licence");
+}
+
+[Test(SeasonUnderway)]
+[runas(Dan)]
+void the_desk_verifies_what_waits_sees_what_lapses_and_records_a_briefing() {
+  Ui.Viewport(1440, 1000);
+  Ui.SignInAs(Dan);
+  Ui.Visit("/staff/qualifications");
+  Assert.Visible("Dan Reyes · First aid certificate", within: "Lapsing soon");
+  Assert.Visible("Eve Okafor · Safety briefing", within: "Lapsed");
+  Ui.Click("Verify", within: "Waiting for verification");
+  Assert.Visible("Bo Lindqvist's First aid certificate counts from now.");
+  Ui.Fill("Find a person", "bo");
+  Ui.Click("Find");
+  Ui.Click("Bo Lindqvist", within: "People found");
+  Assert.Visible("Expired", within: "Safety briefing");
+  Ui.Click("Record a qualification");
+  Assert.Dialog("Record a qualification for Bo Lindqvist");
+  Ui.Select("What it is", QualificationKind.Single(k => k.Key == "safety-briefing"));
+  Ui.Click("Record it");
+  Assert.Visible("Bo Lindqvist holds Safety briefing.");
+  Ui.Shot("qualifications-desk");
+  Ui.Click("Revoke", within: "First aid certificate");
+  Ui.Fill("Why", "Certificate number did not check out");
+  Ui.Click("Revoke it");
+  Assert.Visible("Bo Lindqvist's First aid certificate is revoked.");
+}
+
+[Test(SeasonUnderway)]
+[runas(Mia)]
+void the_manager_adds_a_kind_and_publishes_a_new_waiver_text() {
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Mia);
+  Ui.Visit("/staff/qualifications/kinds");
+  Assert.Visible("Text version 1", within: "Hire waiver");
+  Ui.Click("Text", within: "Hire waiver");
+  Ui.Fill("Text", "I take a boat out at my own risk.\n\nI wear a life jacket at all times on the water.\n\nI bring the boat back by sunset.");
+  Ui.Click("Publish this version");
+  Assert.Visible("Hire waiver is signed on version 2 from now on.");
+  Ui.Click("Add a kind");
+  Ui.Fill("Key", "radio");
+  Ui.Fill("Name", "VHF radio certificate");
+  Ui.Fill("Holds for (months)", "0");
+  Ui.Click("Save");
+  Assert.Visible("VHF radio certificate is saved.");
+  Assert.Visible("does not lapse", within: "VHF radio certificate");
+  Ui.Shot("qualifications-kinds");
+}
+
+[Test(SeasonUnderway)]
+[runas(Ada)]
+void the_pages_fit_a_phone_and_read_in_the_dark() {
+  Ui.SignInAs(Ada);
+  Ui.Viewport(390, 844);
+  Ui.Visit("/qualifications");
+  Assert.Visible("Skipper's licence", within: "Held");
+  Assert.NoOverflow();
+  Ui.Shot("qualifications-mine-phone");
+  Ui.Viewport(1440, 1000);
+  Ui.Theme("dark");
+  Ui.SignInAs(Dan);
+  Ui.Visit("/staff/qualifications");
+  Assert.Visible("Lapsing soon");
+  Ui.Shot("qualifications-desk-dark");
+}
