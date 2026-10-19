@@ -172,7 +172,7 @@ public component QualificationsOfPerson(Guid? person = null) {
           Box(grow: 1) { SectionLabel("Held"); }
           Button("Add a qualification", onPress: StartSubmit, size: Size.Sm);
         }
-        Stack(gap: 3, role: UiRole.List, label: "Held") {
+        Stack(gap: 3, role: (wallet.Cards.Count == 0) ? UiRole.Group : UiRole.List, label: "Held") {
           if (wallet.Cards.Count == 0) { EmptyState("Nothing on record yet", body: "Licences, certificates, inductions and signed agreements appear here."); }
           foreach (var c in wallet.Cards) {
             QualificationCardView(c) {
@@ -343,7 +343,7 @@ public component QualificationsDesk() {
               Text(wallet.Name, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold, grow: 1);
               if (IssuesQualifications) { Button("Record a qualification", onPress: StartRecord, size: Size.Sm); }
             }
-            Stack(gap: 3, role: UiRole.List, label: "Their qualifications") {
+            Stack(gap: 3, role: (wallet.Cards.Count == 0) ? UiRole.Group : UiRole.List, label: "Their qualifications") {
               if (wallet.Cards.Count == 0) { EmptyState("Nothing on record", body: "Record what they hold."); }
               foreach (var c in wallet.Cards) {
                 QualificationCardView(c) {
@@ -394,7 +394,7 @@ public component QualificationLines(string title, List<QualificationLine> lines,
   render {
     Stack(gap: 2) {
       SectionLabel(title);
-      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: title) {
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: (lines.Count == 0) ? UiRole.Group : UiRole.List, label: title) {
         if (lines.Count == 0) { Box(p: 4) { Text(empty, color: Colors.TextMuted); } }
         foreach (var l in lines) {
           Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Name) {
@@ -483,7 +483,7 @@ public component QualificationKinds() {
     Stack(gap: 4) {
       Row(gap: 2, justify: Justify.End) { Button("Add a kind", onPress: StartNew, tone: Tone.Primary, size: Size.Sm); }
       if (done != "") { Alert(done, tone: Tone.Success); }
-      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Kinds") {
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: (kinds.Count == 0) ? UiRole.Group : UiRole.List, label: "Kinds") {
         if (kinds.Count == 0) { Box(p: 5) { EmptyState("No kinds yet", body: "Add what you recognise — a licence, an induction, a waiver people sign."); } }
         foreach (var k in kinds) {
           Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: k.Name) {
